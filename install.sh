@@ -1,51 +1,51 @@
 #!/bin/bash
 
-# 颜色定义
+# 颜色
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 PLAIN='\033[0m'
 
-# 检查 Root 权限
-[[ $EUID -ne 0 ]] && echo -e "${RED}错误：${PLAIN} 必须使用 root 用户运行此脚本！\n" && exit 1
+[[ $EUID -ne 0 ]] && echo -e "${RED}错误：${PLAIN} 必须使用 root 用户运行！\n" && exit 1
 
-# 1. 环境准备与工具安装
 prepare_system() {
     echo -e "${YELLOW}正在安装必要工具...${PLAIN}"
     apt-get update -y || yum update -y
     apt-get install -y curl wget tar uuid-runtime openssl socat || yum install -y curl wget tar libuuid openssl socat
 }
 
-# 2. 安装 BBR + Cake
 enable_bbr_cake() {
     echo -e "${YELLOW}正在配置 BBR + Cake...${PLAIN}"
-    if ! grep -q "net.core.default_qdisc=cake" /etc/sysctl.conf; then
-        echo "net.core.default_qdisc=cake" >> /etc/sysctl.conf
-        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-        sysctl -p
-    fi
-    echo -e "${GREEN}BBR + Cake 已激活。${PLAIN}"
+    # 写入配置
+    sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
+    echo "net.core.default_qdisc=cake" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p >/dev/null 2>&1
+    echo -e "${GREEN}BBR + Cake 配置尝试完成。${PLAIN}"
 }
 
-# 3. 安装 Xray 核心
 install_xray() {
-    echo -e "${YELLOW}正在下载并安装 Xray 核心...${PLAIN}"
+    echo -e "${YELLOW}正在安装 Xray 核心...${PLAIN}"
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 }
 
-# 4. 生成 Reality 配置
 config_xray() {
-    # 随机生成高位端口 (10000-65535)
     PORT=$((RANDOM % 55536 + 10000))
     UUID=$(uuidgen)
-    DEST="www.microsoft.com:443"
     SNI="www.microsoft.com"
     
-    # 生成 X25519 密钥对
-    KEYS=$(xray x25519)
-    PRIV_KEY=$(echo "$KEYS" | awk '/Private key:/ {print $3}')
-    PUB_KEY=$(echo "$KEYS" | awk '/Public key:/ {print $3}')
+    # 重点修复：确保路径正确，强制使用绝对路径调用 xray 生成密钥
+    /usr/local/bin/xray x25519 > /tmp/xray_keys
+    PRIV_KEY=$(grep "Private key:" /tmp/xray_keys | awk '{print $3}')
+    PUB_KEY=$(grep "Public key:" /tmp/xray_keys | awk '{print $3}')
     SHORT_ID=$(openssl rand -hex 8)
+
+    # 检查公钥是否成功获取
+    if [ -z "$PUB_KEY" ]; then
+        echo -e "${RED}错误：无法生成 Xray 密钥，请检查 Xray 是否安装成功。${PLAIN}"
+        exit 1
+    fi
 
     cat <<EOF > /usr/local/etc/xray/config.json
 {
@@ -62,7 +62,7 @@ config_xray() {
             "security": "reality",
             "realitySettings": {
                 "show": false,
-                "dest": "$DEST",
+                "dest": "$SNI:443",
                 "xver": 0,
                 "serverNames": ["$SNI"],
                 "privateKey": "$PRIV_KEY",
@@ -74,7 +74,7 @@ config_xray() {
 }
 EOF
 
-    # 自动放行端口
+    # 防火墙
     if command -v ufw > /dev/null; then
         ufw allow $PORT/tcp
     elif command -v firewall-cmd > /dev/null; then
@@ -84,66 +84,52 @@ EOF
 
     systemctl restart xray
     
-    # 保存信息用于 info 命令
-    echo "PORT=$PORT" > /etc/xray_info
-    echo "UUID=$UUID" >> /etc/xray_info
-    echo "PUB_KEY=$PUB_KEY" >> /etc/xray_info
-    echo "SHORT_ID=$SHORT_ID" >> /etc/xray_info
-    echo "SNI=$SNI" >> /etc/xray_info
+    # 保存信息
+    cat <<EOF > /etc/xray_info
+PORT=$PORT
+UUID=$UUID
+PUB_KEY=$PUB_KEY
+SHORT_ID=$SHORT_ID
+SNI=$SNI
+EOF
 }
 
-# 5. 构建管理命令
 build_cli() {
-    cat <<EOF > /usr/bin/info
+    # 修复 info 命令
+    cat <<'EOF' > /usr/bin/info
 #!/bin/bash
 source /etc/xray_info
-IP=\$(curl -s ifconfig.me)
+IP=$(curl -s ifconfig.me)
 echo -e "\033[32m--- Xray Reality 节点信息 ---\033[0m"
-echo -e "地址: \$IP"
-echo -e "端口: \$PORT"
-echo -e "UUID: \$UUID"
-echo -e "流控: xtls-rprx-vision"
-echo -e "传输: tcp"
-echo -e "安全: reality"
-echo -e "SNI: \$SNI"
-echo -e "PublicKey: \$PUB_KEY"
-echo -e "ShortID: \$SHORT_ID"
-echo -e "Fingerprint: chrome"
+echo -e "地址: $IP"
+echo -e "端口: $PORT"
+echo -e "UUID: $UUID"
+echo -e "PublicKey: $PUB_KEY"
+echo -e "ShortID: $SHORT_ID"
 echo -e "\033[33m--- 分享链接 ---\033[0m"
-echo "vless://\$UUID@\$IP:\$PORT?security=reality&sni=\$SNI&fp=chrome&pbk=\$PUB_KEY&sid=\$SHORT_ID&flow=xtls-rprx-vision&type=tcp#Reality_Node"
+echo "vless://$UUID@$IP:$PORT?security=reality&sni=$SNI&fp=chrome&pbk=$PUB_KEY&sid=$SHORT_ID&flow=xtls-rprx-vision&type=tcp#Reality_Node"
 EOF
 
-    cat <<EOF > /usr/bin/update
+    # 修复 bbr 命令显示逻辑
+    cat <<'EOF' > /usr/bin/bbr
 #!/bin/bash
-bash -c "\$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-systemctl restart xray
-echo "Xray 内核更新完成。"
+printf "当前拥塞控制算法: "
+sysctl net.ipv4.tcp_congestion_control | awk '{print $3}'
+printf "当前队列算法: "
+if [ -f /proc/sys/net/core/default_qdisc ]; then
+    sysctl net.core.default_qdisc | awk '{print $3}'
+else
+    echo "无法读取(可能受限于虚拟化技术)"
+fi
 EOF
 
-    cat <<EOF > /usr/bin/bbr
-#!/bin/bash
-echo -n "当前拥塞控制算法: "
-sysctl net.ipv4.tcp_congestion_control | awk '{print \$3}'
-echo -n "当前队列算法: "
-sysctl net.core.default_qdisc | awk '{print \$3}'
-EOF
-
-    chmod +x /usr/bin/info /usr/bin/update /usr/bin/bbr
+    chmod +x /usr/bin/info /usr/bin/bbr
 }
 
-# 主程序
-main() {
-    prepare_system
-    enable_bbr_cake
-    install_xray
-    config_xray
-    build_cli
-    
-    echo -e "${GREEN}安装完成！${PLAIN}"
-    echo -e "输入 ${YELLOW}info${PLAIN} 查看节点信息"
-    echo -e "输入 ${YELLOW}update${PLAIN} 更新内核"
-    echo -e "输入 ${YELLOW}bbr${PLAIN} 查看加速状态"
-    info
-}
-
-main
+# 运行
+prepare_system
+enable_bbr_cake
+install_xray
+config_xray
+build_cli
+info
