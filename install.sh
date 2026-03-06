@@ -13,39 +13,42 @@ prepare_system() {
     apt-get install -y curl wget tar uuid-runtime openssl socat || yum install -y curl wget tar libuuid openssl socat
 }
 
-# 3. 安装 Xray (先安装，后生成密钥)
+# 3. 安装 Xray
 install_xray() {
-    echo -e "${YELLOW}正在安装 Xray 核心...${PLAIN}"
+    echo -e "${YELLOW}正在安装/检查 Xray 核心...${PLAIN}"
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-    sleep 2 # 等待文件写入
 }
 
-# 4. 修复的关键：生成并捕获 Reality 密钥
+# 4. 生成 Reality 密钥 (增强型)
 config_xray() {
-    # 随机参数
     PORT=$((RANDOM % 55536 + 10000))
     UUID=$(uuidgen)
     SNI="www.microsoft.com"
     SHORT_ID=$(openssl rand -hex 8)
 
-    # 重点：通过临时文件捕获密钥对，并使用绝对路径
-    XRAY_BIN="/usr/local/bin/xray"
-    if [ ! -f "$XRAY_BIN" ]; then
-        XRAY_BIN=$(which xray)
-    fi
+    # 自动查找 Xray 路径
+    XRAY_BIN=$(which xray)
+    [ -z "$XRAY_BIN" ] && XRAY_BIN="/usr/local/bin/xray"
 
-    # 尝试生成密钥
-    $XRAY_BIN x25519 > /tmp/xray_keys.txt
-    PRIV_KEY=$(grep "Private key:" /tmp/xray_keys.txt | awk '{print $3}')
-    PUB_KEY=$(grep "Public key:" /tmp/xray_keys.txt | awk '{print $3}')
-
-    # 如果还是空的，手动抛出错误停止，不生成错误的节点
-    if [ -z "$PUB_KEY" ]; then
-        echo -e "${RED}致命错误：无法提取 PublicKey。请检查 /usr/local/bin/xray 是否存在。${PLAIN}"
+    if [ ! -x "$XRAY_BIN" ]; then
+        echo -e "${RED}错误：找不到可执行的 Xray 二进制文件！${PLAIN}"
         exit 1
     fi
 
-    # 写入 JSON 配置
+    # 核心修复：合并标准输出和错误输出，确保能抓到 key
+    echo -e "${YELLOW}正在生成密钥对...${PLAIN}"
+    $XRAY_BIN x25519 > /tmp/xray_keys.txt 2>&1
+    
+    PRIV_KEY=$(grep "Private key:" /tmp/xray_keys.txt | awk '{print $3}')
+    PUB_KEY=$(grep "Public key:" /tmp/xray_keys.txt | awk '{print $3}')
+
+    if [ -z "$PUB_KEY" ]; then
+        echo -e "${RED}无法生成密钥。手动输出调试信息：${PLAIN}"
+        cat /tmp/xray_keys.txt
+        exit 1
+    fi
+
+    # 写入 JSON
     cat <<EOF > /usr/local/etc/xray/config.json
 {
     "log": { "loglevel": "warning" },
@@ -83,7 +86,6 @@ EOF
 
     systemctl restart xray
     
-    # 固化信息到文件以便 info 命令读取
     cat <<EOF > /etc/xray_info
 PORT=$PORT
 UUID=$UUID
@@ -93,12 +95,10 @@ SNI=$SNI
 EOF
 }
 
-# 5. 构建命令
 build_cli() {
-    # 构建 info 命令
+    # 构建 info 命令 (增加流控和指纹显示)
     cat <<'EOF' > /usr/bin/info
 #!/bin/bash
-if [ ! -f /etc/xray_info ]; then echo "未发现配置文件"; exit 1; fi
 source /etc/xray_info
 IP=$(curl -s ifconfig.me)
 echo -e "\033[32m--- Xray Reality 节点信息 ---\033[0m"
@@ -107,13 +107,15 @@ echo -e "端口: $PORT"
 echo -e "UUID: $UUID"
 echo -e "PublicKey: $PUB_KEY"
 echo -e "ShortID: $SHORT_ID"
+echo -e "流控: xtls-rprx-vision"
+echo -e "指纹: chrome"
 echo -e "\033[33m--- 分享链接 ---\033[0m"
 echo "vless://$UUID@$IP:$PORT?security=reality&sni=$SNI&fp=chrome&pbk=$PUB_KEY&sid=$SHORT_ID&flow=xtls-rprx-vision&type=tcp#Reality_Node"
 EOF
     chmod +x /usr/bin/info
 }
 
-# 主程序顺序调整：先安装环境 -> 安装Xray -> 再生成配置
+# 主程序
 main() {
     prepare_system
     install_xray
