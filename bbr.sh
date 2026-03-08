@@ -10,14 +10,30 @@ NC='\033[0m'
 # 权限检查
 [[ $EUID -ne 0 ]] && echo -e "${RED}错误: 必须使用 root 权限运行此脚本！${NC}" && exit 1
 
+# 自动注册全局命令
+if [ -f "$0" ] && [[ "$0" != /dev/fd/* ]] && [ "$0" != "bash" ]; then
+    if [ "$(realpath "$0")" != "/usr/local/bin/bbr" ]; then
+        cp -f "$0" /usr/local/bin/bbr
+        chmod +x /usr/local/bin/bbr
+        echo -e "${GREEN}====================================================${NC}"
+        echo -e "${GREEN}  已成功添加全局命令！以后只需输入 ${YELLOW}bbr${GREEN} 即可打开菜单。${NC}"
+        echo -e "${GREEN}====================================================${NC}"
+        sleep 2
+    fi
+fi
+
 # 检查内核版本 (Cake 需要 4.19+)
 kernel_version=$(uname -r | cut -d- -f1)
 major=$(echo $kernel_version | cut -d. -f1)
 minor=$(echo $kernel_version | cut -d. -f2)
 
 check_status() {
-    current_qdisc=$(sysctl net.core.default_qdisc | awk '{print $3}')
-    current_cc=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+    current_qdisc=$(sysctl net.core.default_qdisc 2>/dev/null | awk '{print $3}')
+    current_cc=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
+    
+    [[ -z "$current_qdisc" ]] && current_qdisc="系统默认"
+    [[ -z "$current_cc" ]] && current_cc="系统默认"
+
     echo -e "${BLUE}============================${NC}"
     echo -e "${YELLOW}当前内核版本: ${NC}$kernel_version"
     echo -e "${YELLOW}当前队列算法: ${NC}${GREEN}$current_qdisc${NC}"
@@ -37,7 +53,7 @@ apply_conf() {
     
     # 使配置生效
     sysctl -p >/dev/null 2>&1
-    echo -e "${GREEN}成功切换至 BBR + $qdisc !${NC}"
+    echo -e "${GREEN}设置成功！已切换至 BBR + $qdisc !${NC}"
 }
 
 show_menu() {
@@ -45,9 +61,9 @@ show_menu() {
     echo -e "${BLUE}BBR + Cake/FQ 自由切换脚本${NC}"
     echo -e "${BLUE}----------------------------${NC}"
     check_status
-    echo -e "1. 切换至 ${GREEN}BBR + FQ${NC} (经典组合，适合大部分环境)"
+    echo -e "1. 切换至 ${GREEN}BBR + FQ${NC}   (经典组合，适合大部分环境)"
     echo -e "2. 切换至 ${GREEN}BBR + Cake${NC} (最新算法，抗丢包更强，需内核4.19+)"
-    echo -e "3. 仅开启 BBR (保持默认队列)"
+    echo -e "3. 仅开启 BBR        (保持默认队列)"
     echo -e "4. 卸载/恢复系统默认设置"
     echo -e "0. 退出脚本"
     echo -e "${BLUE}----------------------------${NC}"
@@ -66,15 +82,16 @@ show_menu() {
             fi
             ;;
         3)
-            apply_conf "$(sysctl net.core.default_qdisc | awk '{print $3}')"
+            apply_conf "$(sysctl net.core.default_qdisc 2>/dev/null | awk '{print $3}')"
             ;;
         4)
             sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
             sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
             sysctl -p >/dev/null 2>&1
-            echo -e "${YELLOW}已恢复默认设置。${NC}"
+            echo -e "${YELLOW}已清理自定义配置，恢复系统默认设置。${NC}"
             ;;
         0)
+            echo -e "${GREEN}已退出。提示：以后随时在终端输入 ${YELLOW}bbr${GREEN} 即可再次打开此菜单！${NC}"
             exit 0
             ;;
         *)
@@ -87,6 +104,6 @@ show_menu() {
 # 循环显示菜单
 while true; do
     show_menu
-    echo -e "${BLUE}按任意键返回菜单...${NC}"
+    echo -e "\n${BLUE}按任意键返回菜单...${NC}"
     read -n 1
 done
