@@ -1,3 +1,4 @@
+cat << 'EOF' > /usr/local/bin/bbr
 #!/bin/bash
 
 # 颜色定义
@@ -9,18 +10,6 @@ NC='\033[0m'
 
 # 权限检查
 [[ $EUID -ne 0 ]] && echo -e "${RED}错误: 必须使用 root 权限运行此脚本！${NC}" && exit 1
-
-# 自动注册全局命令
-if [ -f "$0" ] && [[ "$0" != /dev/fd/* ]] && [ "$0" != "bash" ]; then
-    if [ "$(realpath "$0")" != "/usr/local/bin/bbr" ]; then
-        cp -f "$0" /usr/local/bin/bbr
-        chmod +x /usr/local/bin/bbr
-        echo -e "${GREEN}====================================================${NC}"
-        echo -e "${GREEN}  已成功添加全局命令！以后只需输入 ${YELLOW}bbr${GREEN} 即可打开菜单。${NC}"
-        echo -e "${GREEN}====================================================${NC}"
-        sleep 2
-    fi
-fi
 
 # 检查内核版本 (Cake 需要 4.19+)
 kernel_version=$(uname -r | cut -d- -f1)
@@ -107,3 +96,7 @@ while true; do
     echo -e "\n${BLUE}按任意键返回菜单...${NC}"
     read -n 1
 done
+EOF
+
+chmod +x /usr/local/bin/bbr
+bbr
