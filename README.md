@@ -1,4 +1,4 @@
 
-#curl -O https://raw.githubusercontent.com/just521/Auto/refs/heads/main/xray%20install.sh
+//curl -O https://raw.githubusercontent.com/just521/Auto/refs/heads/main/xray_auto.sh
 
-#chmod +x xray install.sh && ./xray install.sh install  #
+//chmod +x xray_auto.sh && ./xray_auto.sh install
