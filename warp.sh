@@ -1,4 +1,4 @@
-cat > /usr/local/bin/warp <<'EOF'
+cat > warp.sh <<'EOF'
 #!/bin/bash
 
 # 颜色定义
@@ -48,7 +48,7 @@ install_all() {
 
 # 2. 更新 Xray 配置
 update_xray_config() {
-    local domains=$(cat "$GEOSITE_LIST")
+    local domains=$(cat "$GEOSITE_LIST" 2>/dev/null || echo '"geosite:google"')
     cat > $CONFIG_PATH <<EOF
 {
   "log": { "loglevel": "warning" },
@@ -72,7 +72,7 @@ update_xray_config() {
 }
 EOF
     systemctl restart xray
-    echo -e "${GREEN}Xray 配置已更新。${NC}"
+    echo -e "${GREEN}Xray 配置已更新并重启。${NC}"
 }
 
 # 3. 获取区域
@@ -80,14 +80,14 @@ get_warp_location() {
     curl -x socks5h://127.0.0.1:40000 -s --max-time 5 https://gs.apple.com/fastlane/refetch | grep -oE '[A-Z]{2}' | head -n 1
 }
 
-# 4. 筛选 IP (核心修复)
+# 4. 筛选 IP (修复语法错误)
 fix_google_and_loc() {
     echo -e "${BLUE}开始筛选优质 IP...${NC}"
     warp-cli connect > /dev/null 2>&1
     sleep 2
     
     local vps_loc=$(curl -s https://ipapi.co/country/)
-    [[ -z "$vps_loc" ]] && vps_loc="Unknown"
+    [ -z "$vps_loc" ] && vps_loc="Unknown"
     echo -e "${GREEN}VPS 原始区域: $vps_loc${NC}"
 
     local count=1
@@ -101,9 +101,7 @@ fix_google_and_loc() {
             echo -e "\n${GREEN}✅ 成功！Google 未送中，区域: $warp_loc${NC}"
             return 0
         else
-            if ! warp-cli registration rotate > /dev/null 2>&1; then
-                warp-cli rotate-keys > /dev/null 2>&1
-            fi
+            warp-cli registration rotate > /dev/null 2>&1 || warp-cli rotate-keys > /dev/null 2>&1
             sleep 3
             count=$((count + 1))
         fi
@@ -114,7 +112,7 @@ fix_google_and_loc() {
 # 5. 管理域名
 manage_domains() {
     echo -e "${BLUE}当前规则: $(cat "$GEOSITE_LIST")${NC}"
-    read -p "输入要添加/删除的规则: " new_rule
+    read -p "输入要添加/删除的规则 (如 geosite:disney): " new_rule
     if [[ -n "$new_rule" ]]; then
         if grep -q "$new_rule" "$GEOSITE_LIST"; then
             sed -i "s/\"$new_rule\",//g; s/,\"$new_rule\"//g; s/\"$new_rule\"//g" "$GEOSITE_LIST"
@@ -133,8 +131,8 @@ while true; do
     clear
     status=$(warp-cli status 2>/dev/null | grep -i "Status update:" | awk '{print $3}')
     echo -e "${BLUE}==============================${NC}"
-    echo -e "   WARP 管理工具 (输入 warp 启动)"
-    echo -e "   WARP 状态: ${YELLOW}${status:-Connected?}${NC}"
+    echo -e "   WARP 修复版管理工具"
+    echo -e "   WARP 状态: ${YELLOW}${status:-Disconnected}${NC}"
     echo -e "${BLUE}==============================${NC}"
     echo -e "1. 安装/初始化"
     echo -e "2. 开启 WARP"
@@ -150,10 +148,11 @@ while true; do
         4) fix_google_and_loc ;;
         5) manage_domains ;;
         0) exit 0 ;;
+        *) echo "无效选择" ;;
     esac
     read -p "按回车继续..."
 done
 EOF
 
-chmod +x /usr/local/bin/warp
-echo -e "\033[32m修复完成！请输入 \033[33mwarp\033[32m 启动菜单。\033[0m"
+chmod +x warp.sh
+./warp.sh
