@@ -128,7 +128,7 @@ show_menu() {
     echo -e "${BLUE}==============================${NC}"
     echo -e "1. 完整安装环境 (首次使用)"
     echo -e "2. 域名分流管理 (添加/删除)"
-    echo -e "3. 筛选非送中 IP (Rotate IP)"
+    echo -e "3. 优选 IP (Rotate IP)"
     echo -e "4. 重启 Xray 服务"
     echo -e "0. 退出"
     read -p "请输入选项: " choice
