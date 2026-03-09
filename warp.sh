@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ─────────────────────────────────────────────
-#  Xray WARP 动态分流管理器 (增强版)
+#  Xray WARP 分流管理
 # ─────────────────────────────────────────────
 
 RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; CYAN="\033[36m"; GRAY="\033[90m"; PLAIN="\033[0m"
@@ -32,7 +32,7 @@ check_warp_socket() {
 }
 
 wait_for_port() {
-    for i in {1..15}; do
+    for i in {1..10}; do
         if check_warp_socket; then return 0; fi
         sleep 1
     done
@@ -59,23 +59,24 @@ ensure_outbound() {
     jq --argjson obj "$out_obj" '.outbounds += [$obj]' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
 }
 
-# 1. 安装/重装
+# 1. 安装/重装 (默认自动优选本地最近节点)
 install_warp() {
     clear
-    echo -e "\n${CYAN}正在安装 WARP (Socks5 模式)...${PLAIN}"
+    echo -e "\n${CYAN}正在安装 WARP (自动匹配最佳节点)...${PLAIN}"
+    # 使用 fscarmen 脚本的默认安装模式
     wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh && bash menu.sh c
     if wait_for_port; then
         ensure_outbound; apply_changes
-        UI_MESSAGE="${GREEN}安装成功！Xray 已自动对接。${PLAIN}"
+        UI_MESSAGE="${GREEN}安装成功！已自动匹配最佳 IP 并对接 Xray。${PLAIN}"
     else
-        UI_MESSAGE="${RED}安装超时，请检查网络。${PLAIN}"
+        UI_MESSAGE="${RED}安装后启动超时，请检查服务状态。${PLAIN}"
     fi
 }
 
 # 2. 卸载
 uninstall_warp() {
     clear
-    echo -e "\n${RED}正在卸载 WARP 并清理规则...${PLAIN}"
+    echo -e "\n${RED}正在卸载 WARP 并清理 Xray 配置...${PLAIN}"
     wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh && bash menu.sh u
     jq 'del(.outbounds[] | select(.tag=="warp_proxy"))' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
     jq 'del(.routing.rules[] | select(.outboundTag=="warp_proxy"))' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
@@ -85,7 +86,7 @@ uninstall_warp() {
 
 # 3. 分流管理
 manage_custom_rule() {
-    if ! check_warp_socket; then UI_MESSAGE="${RED}错误：WARP 未运行！${PLAIN}"; return; fi
+    if ! check_warp_socket; then UI_MESSAGE="${RED}错误：WARP 未运行，无法配置分流！${PLAIN}"; return; fi
     echo -e "\n${CYAN}请输入要分流的标签 (例如 geosite:google 或 domain:openai.com)${PLAIN}"
     read -p "输入已存在则删除，不存在则添加: " user_input
     [ -z "$user_input" ] && return
@@ -102,27 +103,21 @@ manage_custom_rule() {
     apply_changes
 }
 
-# 4. IP 优选 (地区/端点管理)
-optimize_warp_ip() {
-    if ! check_warp_socket; then UI_MESSAGE="${RED}错误：WARP 未运行！${PLAIN}"; return; fi
-    clear
-    echo -e "${CYAN}===================================================${PLAIN}"
-    echo -e "             WARP Endpoint (端点/地区) 优选"
-    echo -e "---------------------------------------------------"
-    echo -e "  1. ${GREEN}自动优选${PLAIN} (寻找延迟最低的端点)"
-    echo -e "  2. ${YELLOW}手动指定${PLAIN} (输入特定地区 Endpoint IP)"
-    echo -e "  3. ${CYAN}刷新 IP${PLAIN} (重启 WARP 尝试更换出口)"
-    echo -e "---------------------------------------------------"
-    read -p "请选择 [1-3]: " opt_choice
-    case "$opt_choice" in
-        1) wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh && bash menu.sh e ;;
-        2) read -p "请输入 Endpoint (IP:Port): " ep
-           [ -n "$ep" ] && (wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh && bash menu.sh e <<EOF
-$ep
-EOF
-) ;;
-        3) wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh && bash menu.sh r ;;
-    esac
+# 4. 开启/关闭 WARP
+toggle_warp_service() {
+    if check_warp_socket; then
+        echo -e "\n${YELLOW}正在停止 WARP 服务...${PLAIN}"
+        systemctl stop warp >/dev/null 2>&1
+        UI_MESSAGE="${YELLOW}WARP 已关闭 (Xray 分流将失效)${PLAIN}"
+    else
+        echo -e "\n${GREEN}正在启动 WARP 服务...${PLAIN}"
+        systemctl start warp >/dev/null 2>&1
+        if wait_for_port; then
+            UI_MESSAGE="${GREEN}WARP 已成功启动${PLAIN}"
+        else
+            UI_MESSAGE="${RED}WARP 启动失败，请检查是否已安装${PLAIN}"
+        fi
+    fi
 }
 
 # ─── 菜单界面 ────────────────────────────────
@@ -131,16 +126,17 @@ show_menu() {
     # 状态计算
     if check_warp_socket; then 
         STATUS_SOCK="${GREEN}● 运行中${PLAIN}"
-        # 获取 WARP 详细信息 (设置 2秒超时防止卡顿)
         local trace=$(curl -s4m 2 --socks5 127.0.0.1:$WARP_PORT https://www.cloudflare.com/cdn-cgi/trace)
         WARP_IP=$(echo "$trace" | grep "ip=" | cut -d= -f2)
         WARP_LOC=$(echo "$trace" | grep "loc=" | cut -d= -f2)
         [ -z "$WARP_IP" ] && WARP_IP="${RED}获取失败${PLAIN}"
         [ -z "$WARP_LOC" ] && WARP_LOC="${RED}获取失败${PLAIN}"
+        TOGGLE_TEXT="关闭 WARP 服务"
     else 
-        STATUS_SOCK="${RED}● 未运行${PLAIN}"
+        STATUS_SOCK="${RED}● 已停止${PLAIN}"
         WARP_IP="${GRAY}N/A${PLAIN}"
         WARP_LOC="${GRAY}N/A${PLAIN}"
+        TOGGLE_TEXT="开启 WARP 服务"
     fi
 
     if check_xray_outbound; then STATUS_XRAY="${GREEN}● 已连接${PLAIN}"; else STATUS_XRAY="${YELLOW}● 未连接${PLAIN}"; fi
@@ -149,7 +145,7 @@ show_menu() {
     [ -z "$current_rules" ] && current_rules="${GRAY}无${PLAIN}"
 
     echo -e "${CYAN}===================================================${PLAIN}"
-    echo -e "${CYAN}           WARP 动态分流管理面板 (Xray)           ${PLAIN}"
+    echo -e "${CYAN}           WARP 动态分流管理面板 (精简版)           ${PLAIN}"
     echo -e "${CYAN}===================================================${PLAIN}"
     echo -e "  WARP 状态: ${STATUS_SOCK}"
     echo -e "  Xray 接口: ${STATUS_XRAY}"
@@ -157,10 +153,10 @@ show_menu() {
     echo -e "  归 属 地 : ${GREEN}${WARP_LOC}${PLAIN}"
     echo -e "  当前分流 : ${YELLOW}${current_rules}${PLAIN}"
     echo -e "---------------------------------------------------"
-    echo -e "  1. 安装/重装 WARP (Socks5:40000)"
+    echo -e "  1. 安装/重装 WARP (自动优选节点)"
     echo -e "  2. 卸载/清理 WARP 及所有分流规则"
     echo -e "  3. 添加/删除 自定义分流 (geosite/domain)"
-    echo -e "  4. ${CYAN}优选 WARP Endpoint (更换出口地区/延迟)${PLAIN}"
+    echo -e "  4. ${YELLOW}${TOGGLE_TEXT}${PLAIN}"
     echo -e "---------------------------------------------------"
     echo -e "  0. 退出 (Exit)"
     echo -e "==================================================="
@@ -180,7 +176,7 @@ while true; do
         1) install_warp ;;
         2) uninstall_warp ;;
         3) manage_custom_rule ;;
-        4) optimize_warp_ip ;;
+        4) toggle_warp_service ;;
         0) clear; exit 0 ;;
         *) UI_MESSAGE="${RED}无效输入！${PLAIN}" ;;
     esac
