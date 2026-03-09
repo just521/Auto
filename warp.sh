@@ -1,209 +1,175 @@
 #!/bin/bash
 
-# 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# ─────────────────────────────────────────────
+#  Xray WARP 分流管理器
+# ─────────────────────────────────────────────
 
-CONFIG_PATH="/usr/local/etc/xray/config.json"
-SCRIPT_PATH="$(readlink -f "$0")"
+RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; CYAN="\033[36m"; GRAY="\033[90m"; PLAIN="\033[0m"
 
-# 检查 root 权限
-[[ $EUID -ne 0 ]] && echo -e "${RED}错误: 必须使用 root 权限运行此脚本。${NC}" && exit 1
+CONFIG_FILE="/usr/local/etc/xray/config.json"
+WARP_PORT=40000
 
-# --- 核心功能函数 ---
+UI_MESSAGE=""
 
-# 1. 安装与修复环境
-install_all() {
-    echo -e "${YELLOW}正在同步系统时间与更新基础环境...${NC}"
-    apt-get update
-    apt-get install -y curl gpg lsb-release wget jq ca-certificates
-    update-ca-certificates
+# ─── 环境检查 ────────────────────────────────
+clear
+if [ "$EUID" -ne 0 ]; then echo -e "${RED}请使用 sudo 运行此脚本！${PLAIN}"; exit 1; fi
 
-    # 安装 WARP
-    if ! command -v warp-cli &> /dev/null; then
-        echo -e "${YELLOW}正在安装 Cloudflare WARP...${NC}"
-        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-        OS_CODENAME=$(lsb_release -cs)
-        [[ "$OS_CODENAME" == "trixie" || "$OS_CODENAME" == "sid" ]] && OS_CODENAME="bookworm"
-        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $OS_CODENAME main" | tee /etc/apt/sources.list.d/cloudflare-client.list
-        apt-get update && apt-get install -y cloudflare-warp
-    fi
-
-    echo -e "${YELLOW}正在初始化 WARP 配置...${NC}"
-    systemctl enable --now warp-svc
-    sleep 2
-    
-    warp-cli --accept-tos registration new 2>/dev/null || true
-    warp-cli --accept-tos mode proxy
-    warp-cli --accept-tos proxy port 40000
-    warp-cli --accept-tos tunnel protocol set WireGuard
-    warp-cli --accept-tos connect
-    
-    # 安装 Xray
-    if ! command -v xray &> /dev/null; then
-        echo -e "${YELLOW}正在安装 Xray...${NC}"
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-    fi
-
-    init_config
-    set_global_command
-    echo -e "${GREEN}安装与修复完成！${NC}"
-    check_status
+# ─── WARP 连通性检测 ─────────────────────────
+check_warp_socket() {
+    (echo > /dev/tcp/127.0.0.1/$WARP_PORT) >/dev/null 2>&1
 }
 
-# 2. 初始化 Xray 配置
-init_config() {
-    mkdir -p $(dirname $CONFIG_PATH)
-    if [ ! -f $CONFIG_PATH ]; then
-        cat > $CONFIG_PATH <<EOF
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [{
-    "port": 1080,
-    "protocol": "socks",
-    "sniffing": { "enabled": true, "destOverride": ["http", "tls"] },
-    "settings": { "auth": "noauth", "udp": true }
-  }],
-  "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
-    { "tag": "warp_proxy", "protocol": "socks", "settings": { "servers": [{ "address": "127.0.0.1", "port": 40000 }] } }
-  ],
-  "routing": {
-    "domainStrategy": "IPIfNonMatch",
-    "rules": [
-      {
-        "type": "field",
-        "domain": ["geosite:google", "geosite:netflix", "geosite:openai"],
-        "outboundTag": "warp_proxy"
-      },
-      { "type": "field", "outboundTag": "direct", "network": "tcp,udp" }
-    ]
-  }
-}
-EOF
-    fi
-    systemctl restart xray
+wait_for_port() {
+    for i in {1..15}; do
+        if check_warp_socket; then return 0; fi
+        sleep 1
+    done
+    return 1
 }
 
-# 3. 域名分流管理
-manage_domains() {
-    echo -e "\n${BLUE}--- 域名分流管理 ---${NC}"
-    current_domains=$(jq -r '.routing.rules[0].domain[]' $CONFIG_PATH)
-    echo -e "当前走 WARP 的域名/标签:"
-    echo -e "${YELLOW}$current_domains${NC}"
-    echo "--------------------"
-    echo "1. 添加域名 (例如: facebook.com)"
-    echo "2. 删除域名"
-    echo "0. 返回主菜单"
-    read -p "请选择: " dom_opt
-
-    case $dom_opt in
-        1)
-            read -p "请输入要添加的域名: " new_dom
-            jq ".routing.rules[0].domain += [\"$new_dom\"]" $CONFIG_PATH > ${CONFIG_PATH}.tmp && mv ${CONFIG_PATH}.tmp $CONFIG_PATH
-            systemctl restart xray && echo -e "${GREEN}已添加并重启 Xray${NC}"
-            ;;
-        2)
-            read -p "请输入要删除的域名: " del_dom
-            jq ".routing.rules[0].domain -= [\"$del_dom\"]" $CONFIG_PATH > ${CONFIG_PATH}.tmp && mv ${CONFIG_PATH}.tmp $CONFIG_PATH
-            systemctl restart xray && echo -e "${GREEN}已删除并重启 Xray${NC}"
-            ;;
-    esac
+# ─── Xray 配置状态检测 ───────────────────────
+check_xray_outbound() {
+    jq -e '.outbounds[] | select(.tag=="warp_proxy")' "$CONFIG_FILE" >/dev/null 2>&1
 }
 
-# 4. IP 优选 (Endpoint 修改)
-optimize_ip() {
-    echo -e "\n${BLUE}--- WARP Endpoint 优选 ---${NC}"
-    echo "1. 使用默认优选 IP (162.159.193.10:2408)"
-    echo "2. 使用 Cloudflare 官方 IP (engage.cloudflareclient.com:2408)"
-    echo "3. 手动输入优选 IP:端口"
-    echo "4. 还原默认"
-    read -p "请选择: " ip_opt
-
-    case $ip_opt in
-        1) target="162.159.193.10:2408" ;;
-        2) target="engage.cloudflareclient.com:2408" ;;
-        3) read -p "请输入 IP:端口 : " target ;;
-        4) warp-cli --accept-tos tunnel endpoint reset; return ;;
-    esac
-
-    if [ ! -z "$target" ]; then
-        warp-cli --accept-tos tunnel endpoint set "$target"
-        echo -e "${GREEN}Endpoint 已修改为: $target${NC}"
-        sleep 2
-        warp-cli connect
-    fi
-}
-
-# 5. 状态检查
-check_status() {
-    echo -e "\n${BLUE}--- 当前状态检查 ---${NC}"
-    # 兼容新旧版本 warp-cli 输出
-    warp_raw=$(warp-cli status)
-    warp_s=$(echo "$warp_raw" | grep -Ei "Status update:|Status:" | awk '{print $NF}')
-    
-    echo -ne "WARP 状态: "
-    if [[ "$warp_s" == "Connected" ]]; then
-        echo -e "${GREEN}Connected (已连接)${NC}"
+check_rule_ui() {
+    local site=$1
+    if jq -e --arg site "$site" '.routing.rules[] | select(.outboundTag=="warp_proxy" and (.domain | index($site)))' "$CONFIG_FILE" >/dev/null 2>&1; then
+        echo -e "${GREEN}WARP托管${PLAIN}"
     else
-        echo -e "${RED}${warp_s:-Disconnected} (未就绪)${NC}"
-        echo -e "${YELLOW}提示: 若显示连接中，请稍等几秒再查看。${NC}"
-    fi
-
-    xray_s=$(systemctl is-active xray)
-    echo -e "Xray 状态: $([[ "$xray_s" == "active" ]] && echo -e "${GREEN}运行中${NC}" || echo -e "${RED}停止${NC}")"
-    
-    # 检查出口 IP
-    echo -ne "WARP 出口 IP: "
-    exit_ip=$(curl -s4m 2 --proxy socks5://127.0.0.1:40000 https://ifconfig.me)
-    if [ ! -z "$exit_ip" ]; then echo -e "${GREEN}$exit_ip${NC}"; else echo -e "${RED}无法获取${NC}"; fi
-    
-    echo -e "--------------------"
-}
-
-# 设置全局命令
-set_global_command() {
-    if [[ ! -f /usr/bin/warp ]]; then
-        ln -s "$SCRIPT_PATH" /usr/bin/warp
-        chmod +x /usr/bin/warp
+        echo -e "${YELLOW}默认直连${PLAIN}"
     fi
 }
 
-# --- 主菜单 ---
-show_menu() {
+# ─── 配置应用 & 重启 ─────────────────────────
+apply_changes() {
+    systemctl restart xray >/dev/null 2>&1
+}
+
+ensure_outbound() {
+    if check_xray_outbound; then return; fi
+    local out_obj='{"tag": "warp_proxy", "protocol": "socks", "settings": {"servers": [{"address": "127.0.0.1", "port": '$WARP_PORT'}]}}'
+    jq --argjson obj "$out_obj" '.outbounds += [$obj]' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" 2>/dev/null && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+}
+
+remove_outbound() {
+    jq 'del(.outbounds[] | select(.tag=="warp_proxy"))' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" 2>/dev/null && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+    jq 'del(.routing.rules[] | select(.outboundTag=="warp_proxy"))' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" 2>/dev/null && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+}
+
+# ─── 分流规则开关 ────────────────────────────
+toggle_rule() {
+    local name=$1; local sites_json=$2
+
+    if ! check_warp_socket; then
+        UI_MESSAGE="${YELLOW}WARP 未运行！无法修改分流，请执行 1 安装。${PLAIN}"
+        return
+    fi
+
+    ensure_outbound
+
+    local first_site=$(echo "$sites_json" | jq -r '.[0]' 2>/dev/null)
+    local is_enabled=false
+    if jq -e --arg site "$first_site" '.routing.rules[] | select(.outboundTag=="warp_proxy" and (.domain | index($site)))' "$CONFIG_FILE" >/dev/null 2>&1; then
+        is_enabled=true
+    fi
+
+    if [ "$is_enabled" = true ]; then
+        jq --argjson sites "$sites_json" 'del(.routing.rules[] | select(.outboundTag=="warp_proxy" and (.domain == $sites)))' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" 2>/dev/null && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+        UI_MESSAGE="${YELLOW}已关闭 $name 分流${PLAIN} (Xray已自动重启)"
+    else
+        local new_rule="{\"type\": \"field\", \"domain\": $sites_json, \"outboundTag\": \"warp_proxy\"}"
+        jq --argjson rule "$new_rule" '.routing.rules = [$rule] + .routing.rules' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" 2>/dev/null && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+        UI_MESSAGE="${GREEN}已开启 $name 分流${PLAIN} (Xray已自动重启)"
+    fi
+    apply_changes
+}
+
+# ─── 安装 WARP ───────────────────────────────
+install_warp() {
     clear
-    echo -e "${BLUE}====================================${NC}"
-    echo -e "${GREEN}      WARP & Xray 增强管理脚本${NC}"
-    echo -e "${BLUE}====================================${NC}"
-    echo -e "1. ${YELLOW}完整安装/修复环境 (含证书/协议修复)${NC}"
-    echo -e "2. 域名分流管理 (添加/删除域名)"
-    echo -e "3. WARP IP 优选 (修改 Endpoint)"
-    echo -e "4. 刷新 WARP 连接 (更换出口 IP)"
-    echo -e "5. 查看当前详细状态"
-    echo -e "6. 重启所有服务"
-    echo -e "0. 退出"
-    echo -e "${BLUE}====================================${NC}"
-    read -p "请输入选项: " opt
+    echo -e "\n${CYAN}正在安装 WARP (Socks5 模式)...${PLAIN}"
+    (wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh && bash menu.sh c)
 
-    case $opt in
-        1) install_all ;;
-        2) manage_domains ;;
-        3) optimize_ip ;;
-        4) warp-cli disconnect && sleep 1 && warp-cli connect && echo "已请求更换 IP" ;;
-        5) check_status ;;
-        6) systemctl restart warp-svc xray && echo "服务已重启" ;;
-        0) exit 0 ;;
-        *) echo "无效选项" ;;
-    esac
+    if wait_for_port; then
+        ensure_outbound; apply_changes
+        UI_MESSAGE="${GREEN}安装成功！Xray 已自动对接。${PLAIN}"
+    else
+        UI_MESSAGE="${RED}安装超时或失败，请查看上方日志。${PLAIN}"
+    fi
+    read -n 1 -s -r -p "按任意键返回主菜单..."
+    clear; printf '\033[3J'
 }
 
-# 循环显示菜单
-set_global_command
+# ─── 卸载 WARP ───────────────────────────────
+uninstall_warp() {
+    clear
+    echo -e "\n${RED}正在卸载 WARP...${PLAIN}"
+    if command -v warp &>/dev/null; then (warp u); else (wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh && bash menu.sh u); fi
+    remove_outbound; apply_changes
+    UI_MESSAGE="${GREEN}卸载及规则清理完毕。${PLAIN}"
+    sleep 1
+    clear; printf '\033[3J'
+}
+
+# ─── 菜单界面 ────────────────────────────────
+clear
+show_menu() {
+    tput cup 0 0
+
+    if check_warp_socket; then STATUS_SOCK="${GREEN}● 运行中${PLAIN}"; else STATUS_SOCK="${RED}● 未运行${PLAIN}"; fi
+    if check_xray_outbound; then STATUS_XRAY="${GREEN}● 已连接${PLAIN}"; else STATUS_XRAY="${YELLOW}● 未连接${PLAIN}"; fi
+
+    STATUS_NF=$(check_rule_ui "geosite:netflix")
+    STATUS_AI=$(check_rule_ui "geosite:openai")
+
+    echo -e "${CYAN}===================================================${PLAIN}\033[K"
+    echo -e "${CYAN}           WARP 分流管理面板 (Xray Warp)          ${PLAIN}\033[K"
+    echo -e "${CYAN}===================================================${PLAIN}\033[K"
+    echo -e "  WARP 服务: ${STATUS_SOCK}    Xray 接口: ${STATUS_XRAY}\033[K"
+    echo -e "---------------------------------------------------\033[K"
+    echo -e "  1. 安装/重装 WARP    - ${GRAY}自动配置 Socks5 端口 40000${PLAIN}\033[K"
+    echo -e "  2. 卸载/清理 WARP    - ${GRAY}卸载并清理残留规则${PLAIN}\033[K"
+    echo -e ""\033[K
+    echo -e "  3. 开启/关闭 Netflix 分流              - ${STATUS_NF}\033[K"
+    echo -e "  4. 开启/关闭 OpenAI, Claude, Grok 分流 - ${STATUS_AI}\033[K"
+    echo -e "---------------------------------------------------\033[K"
+    echo -e "  0. 退出 (Exit)\033[K"
+    echo -e "===================================================\033[K"
+    if [ -n "$UI_MESSAGE" ]; then
+        echo -e "${YELLOW}当前操作${PLAIN}: ${UI_MESSAGE}\033[K"
+        UI_MESSAGE=""
+    else
+        echo -e "${YELLOW}当前操作${PLAIN}: ${GRAY}等待输入...${PLAIN}\033[K"
+    fi
+    echo -e "===================================================\033[K"
+    tput ed
+}
+
+# ─── 主循环 ──────────────────────────────────
 while true; do
     show_menu
-    echo -e "\n按任意键返回菜单..."
-    read -n 1
+
+    error_msg=""
+    while true; do
+        if [ -n "$error_msg" ]; then
+            echo -ne "\r\033[K${RED}${error_msg}${PLAIN} 请输入选项 [0-4]: "
+        else
+            echo -ne "\r\033[K请输入选项 [0-4]: "
+        fi
+        read -r choice
+        case "$choice" in
+            1|2|3|4|0) break ;;
+            *) error_msg="输入无效！"; echo -ne "\033[1A" ;;
+        esac
+    done
+
+    case "$choice" in
+        1) install_warp ;;
+        2) uninstall_warp ;;
+        3) toggle_rule "Netflix"      '["geosite:netflix"]' ;;
+        4) toggle_rule "AI Services"  '["geosite:openai","geosite:anthropic","geosite:twitter"]' ;;
+        0) clear; exit 0 ;;
+    esac
 done
