@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ─────────────────────────────────────────────
-#  Xray WARP 分流管理
+#  Xray WARP 动态分流管理器 (精简版)
 # ─────────────────────────────────────────────
 
 RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; CYAN="\033[36m"; GRAY="\033[90m"; PLAIN="\033[0m"
@@ -32,7 +32,7 @@ check_warp_socket() {
 }
 
 wait_for_port() {
-    for i in {1..10}; do
+    for i in {1..15}; do
         if check_warp_socket; then return 0; fi
         sleep 1
     done
@@ -59,15 +59,15 @@ ensure_outbound() {
     jq --argjson obj "$out_obj" '.outbounds += [$obj]' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
 }
 
-# 1. 安装/重装 (默认自动优选本地最近节点)
+# 1. 安装/重装 (自动优选)
 install_warp() {
     clear
-    echo -e "\n${CYAN}正在安装 WARP (自动匹配最佳节点)...${PLAIN}"
-    # 使用 fscarmen 脚本的默认安装模式
+    echo -e "\n${CYAN}正在自动安装 WARP (中文/自动匹配最佳节点)...${PLAIN}"
+    # 使用 fscarmen 脚本，强制中文并执行安装
     wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh && bash menu.sh c
     if wait_for_port; then
         ensure_outbound; apply_changes
-        UI_MESSAGE="${GREEN}安装成功！已自动匹配最佳 IP 并对接 Xray。${PLAIN}"
+        UI_MESSAGE="${GREEN}安装成功！已根据本机 IP 自动匹配最佳节点并对接 Xray。${PLAIN}"
     else
         UI_MESSAGE="${RED}安装后启动超时，请检查服务状态。${PLAIN}"
     fi
@@ -103,19 +103,17 @@ manage_custom_rule() {
     apply_changes
 }
 
-# 4. 开启/关闭 WARP
-toggle_warp_service() {
+# 4. 开启/关闭开关
+toggle_warp() {
     if check_warp_socket; then
-        echo -e "\n${YELLOW}正在停止 WARP 服务...${PLAIN}"
         systemctl stop warp >/dev/null 2>&1
-        UI_MESSAGE="${YELLOW}WARP 已关闭 (Xray 分流将失效)${PLAIN}"
+        UI_MESSAGE="${YELLOW}WARP 服务已停止${PLAIN}"
     else
-        echo -e "\n${GREEN}正在启动 WARP 服务...${PLAIN}"
         systemctl start warp >/dev/null 2>&1
         if wait_for_port; then
-            UI_MESSAGE="${GREEN}WARP 已成功启动${PLAIN}"
+            UI_MESSAGE="${GREEN}WARP 服务已启动${PLAIN}"
         else
-            UI_MESSAGE="${RED}WARP 启动失败，请检查是否已安装${PLAIN}"
+            UI_MESSAGE="${RED}启动失败，请确认是否已安装 WARP${PLAIN}"
         fi
     fi
 }
@@ -145,7 +143,7 @@ show_menu() {
     [ -z "$current_rules" ] && current_rules="${GRAY}无${PLAIN}"
 
     echo -e "${CYAN}===================================================${PLAIN}"
-    echo -e "${CYAN}           WARP 动态分流管理面板 (精简版)           ${PLAIN}"
+    echo -e "${CYAN}           Xray WARP 动态分流管理面板           ${PLAIN}"
     echo -e "${CYAN}===================================================${PLAIN}"
     echo -e "  WARP 状态: ${STATUS_SOCK}"
     echo -e "  Xray 接口: ${STATUS_XRAY}"
@@ -176,7 +174,7 @@ while true; do
         1) install_warp ;;
         2) uninstall_warp ;;
         3) manage_custom_rule ;;
-        4) toggle_warp_service ;;
+        4) toggle_warp ;;
         0) clear; exit 0 ;;
         *) UI_MESSAGE="${RED}无效输入！${PLAIN}" ;;
     esac
