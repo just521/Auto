@@ -11,11 +11,9 @@ NC='\033[0m'
 CONFIG_PATH="/usr/local/etc/xray/config.json"
 GEOSITE_LIST="/usr/local/etc/xray/warp_geosites.list"
 
-# 1. 安装 WARP 和 Xray
+# 1. 安装环境
 install_all() {
-    echo -e "${YELLOW}正在安装依赖 (WARP & Xray)...${NC}"
-    
-    # 安装 WARP
+    echo -e "${YELLOW}正在安装依赖...${NC}"
     if ! command -v warp-cli &> /dev/null; then
         if [[ -f /etc/debian_version ]]; then
             apt-get update && apt-get install -y curl gpg lsb-release
@@ -31,20 +29,15 @@ install_all() {
         warp-cli --accept-tos registration new
     fi
 
-    # 设置 WARP 为代理模式 (端口 40000)
     warp-cli mode proxy
     warp-cli proxy port 40000
     warp-cli connect
 
-    # 安装 Xray
     if ! command -v xray &> /dev/null; then
         bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     fi
 
-    # 初始化配置目录
     mkdir -p /usr/local/etc/xray/
-
-    # 初始化域名列表文件
     if [ ! -f "$GEOSITE_LIST" ]; then
         echo '"geosite:google","geosite:openai","geosite:netflix"' > "$GEOSITE_LIST"
     fi
@@ -53,167 +46,114 @@ install_all() {
     fix_google_and_loc
 }
 
-# 2. 更新 Xray 配置文件
+# 2. 更新 Xray 配置
 update_xray_config() {
     local domains=$(cat "$GEOSITE_LIST")
-    
     cat > $CONFIG_PATH <<EOF
 {
   "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "port": 1080, 
-      "protocol": "socks",
+  "inbounds": [{
+      "port": 1080, "protocol": "socks",
       "sniffing": { "enabled": true, "destOverride": ["http", "tls"] },
       "settings": { "auth": "noauth", "udp": true }
-    }
-  ],
+  }],
   "outbounds": [
     { "protocol": "freedom", "tag": "direct" },
-    {
-      "tag": "warp_proxy",
-      "protocol": "socks",
-      "settings": {
-        "servers": [ { "address": "127.0.0.1", "port": 40000 } ]
-      }
-    },
+    { "tag": "warp_proxy", "protocol": "socks", "settings": { "servers": [{ "address": "127.0.0.1", "port": 40000 }] } },
     { "protocol": "blackhole", "tag": "block" }
   ],
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
-      {
-        "type": "field",
-        "domain": [ $domains ],
-        "outboundTag": "warp_proxy"
-      },
+      { "type": "field", "domain": [ $domains ], "outboundTag": "warp_proxy" },
       { "type": "field", "network": "tcp,udp", "outboundTag": "direct" }
     ]
   }
 }
 EOF
     systemctl restart xray
-    echo -e "${GREEN}Xray 配置已更新并重启。${NC}"
+    echo -e "${GREEN}Xray 配置已更新。${NC}"
 }
 
-# 3. 获取地理位置
+# 3. 获取区域
 get_warp_location() {
-    local loc=$(curl -x socks5h://127.0.0.1:40000 -s --max-time 5 https://gs.apple.com/fastlane/refetch | grep -oE '[A-Z]{2}' | head -n 1)
-    echo "$loc"
+    curl -x socks5h://127.0.0.1:40000 -s --max-time 5 https://gs.apple.com/fastlane/refetch | grep -oE '[A-Z]{2}' | head -n 1
 }
 
-# 4. 筛选 IP (修复送中并适配新版命令)
+# 4. 筛选 IP (核心修复)
 fix_google_and_loc() {
-    echo -e "${BLUE}开始筛选优质 WARP IP...${NC}"
-    
-    # 确保 WARP 已连接
+    echo -e "${BLUE}开始筛选优质 IP...${NC}"
     warp-cli connect > /dev/null 2>&1
     sleep 2
-
-    # 获取 VPS 原始区域
+    
     local vps_loc=$(curl -s https://ipapi.co/country/)
     [[ -z "$vps_loc" ]] && vps_loc="Unknown"
     echo -e "${GREEN}VPS 原始区域: $vps_loc${NC}"
 
     local count=1
-    while true; do
-        echo -ne "${YELLOW}尝试第 $count 次筛选 IP... \r${NC}"
+    while [ $count -le 50 ]; do
+        echo -ne "${YELLOW}尝试第 $count 次筛选... \r${NC}"
         
-        # 检测 Google 是否送中
         local google_check=$(curl -x socks5h://127.0.0.1:40000 -sI https://www.google.com/search?q=ip | grep -Ei "location: https://www.google.com.hk|location: https://www.google.cn")
         local warp_loc=$(get_warp_location)
         
-        # 判断逻辑：Google 没送中 且 (获取到了区域且区域等于VPS区域)
         if [[ -z "$google_check" && "$warp_loc" == "$vps_loc" ]]; then
-            echo -e "\n${GREEN}✅ 完美匹配！Google 未送中 且 区域为 $warp_loc${NC}"
-            break
+            echo -e "\n${GREEN}✅ 成功！Google 未送中，区域: $warp_loc${NC}"
+            return 0
         else
-            # 尝试新版命令，如果失败尝试旧版
             if ! warp-cli registration rotate > /dev/null 2>&1; then
                 warp-cli rotate-keys > /dev/null 2>&1
             fi
-            sleep 3 # 旋转后等待连接稳定
-            ((count++))
-        fi
-        
-        if [[ $count -gt 50 ]]; then
-            echo -e "\n${RED}尝试次数过多，可能当前区域 IP 质量普遍较差，请稍后再试。${NC}"
-            break
+            sleep 3
+            count=$((count + 1))
         fi
     done
+    echo -e "\n${RED}已达最大尝试次数，请手动检查。${NC}"
 }
 
-# 5. 管理域名列表
+# 5. 管理域名
 manage_domains() {
-    echo -e "${BLUE}当前分流规则:${NC}"
-    cat "$GEOSITE_LIST"
-    echo -e "\n${YELLOW}请输入要【添加】或【删除】的规则 (例如 geosite:youtube 或 gemini.google.com)${NC}"
-    read -p "输入规则: " new_rule
-    
-    if [[ ! -z "$new_rule" ]]; then
+    echo -e "${BLUE}当前规则: $(cat "$GEOSITE_LIST")${NC}"
+    read -p "输入要添加/删除的规则: " new_rule
+    if [[ -n "$new_rule" ]]; then
         if grep -q "$new_rule" "$GEOSITE_LIST"; then
             sed -i "s/\"$new_rule\",//g; s/,\"$new_rule\"//g; s/\"$new_rule\"//g" "$GEOSITE_LIST"
-            sed -i 's/,,/,/g; s/^,//; s/,$//' "$GEOSITE_LIST"
-            echo -e "${RED}已移除 $new_rule${NC}"
+            echo -e "${RED}已移除${NC}"
         else
             local current=$(cat "$GEOSITE_LIST")
-            if [[ -z "$current" ]]; then
-                echo "\"$new_rule\"" > "$GEOSITE_LIST"
-            else
-                echo "$current,\"$new_rule\"" > "$GEOSITE_LIST"
-            fi
-            echo -e "${GREEN}已添加 $new_rule${NC}"
+            [ -z "$current" ] && echo "\"$new_rule\"" > "$GEOSITE_LIST" || echo "$current,\"$new_rule\"" > "$GEOSITE_LIST"
+            echo -e "${GREEN}已添加${NC}"
         fi
         update_xray_config
     fi
 }
 
 # 主菜单
-main_menu() {
+while true; do
     clear
-    # 检查 WARP 状态
-    local warp_raw_status=$(warp-cli status 2>/dev/null)
-    local warp_status=$(echo "$warp_raw_status" | grep -i "Status update:" | awk '{print $3}')
-    [[ -z "$warp_status" ]] && warp_status=$(echo "$warp_raw_status" | grep -i "Connected" | head -n 1)
-    
-    echo -e "${BLUE}====================================${NC}"
-    echo -e "   WARP & Xray 分流管理工具 (修复版)"
-    echo -e "   WARP 状态: ${YELLOW}${warp_status:-Unknown}${NC} (Port: 40000)"
-    echo -e "   Xray 状态: ${GREEN}Running${NC} (SOCKS5 Port: 1080)"
-    echo -e "${BLUE}====================================${NC}"
-    echo -e "1. 安装 / 重新初始化环境"
+    status=$(warp-cli status 2>/dev/null | grep -i "Status update:" | awk '{print $3}')
+    echo -e "${BLUE}==============================${NC}"
+    echo -e "   WARP 管理工具 (输入 warp 启动)"
+    echo -e "   WARP 状态: ${YELLOW}${status:-Connected?}${NC}"
+    echo -e "${BLUE}==============================${NC}"
+    echo -e "1. 安装/初始化"
     echo -e "2. 开启 WARP"
     echo -e "3. 关闭 WARP"
-    echo -e "4. ${RED}筛选优质 IP (修复 Google 送中)${NC}"
-    echo -e "------------------------------------"
-    echo -e "5. 管理分流域名 (geosite 或 domain)"
-    echo -e "6. 查看当前所有分流规则"
-    echo -e "------------------------------------"
+    echo -e "4. 筛选 IP (解决送中)"
+    echo -e "5. 管理分流域名"
     echo -e "0. 退出"
-    echo -n "请选择: "
-}
-
-if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}请使用 root 权限运行${NC}"
-   exit 1
-fi
-
-while true; do
-    main_menu
-    read choice
+    read -p "选择: " choice
     case $choice in
         1) install_all ;;
         2) warp-cli connect ;;
         3) warp-cli disconnect ;;
         4) fix_google_and_loc ;;
         5) manage_domains ;;
-        6) cat "$GEOSITE_LIST"; echo ""; read -p "按回车继续..." ;;
         0) exit 0 ;;
     esac
-    echo -e "\n按任意键继续..."
-    read -n 1
+    read -p "按回车继续..."
 done
 EOF
 
 chmod +x /usr/local/bin/warp
-echo -e "\033[32m安装完成！现在你可以直接在终端输入 \033[33mwarp\033[32m 进入菜单了。\033[0m"
+echo -e "\033[32m修复完成！请输入 \033[33mwarp\033[32m 启动菜单。\033[0m"
