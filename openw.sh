@@ -6,21 +6,19 @@ WARP_PORT=40000
 INSTALL_PATH="/usr/local/bin/warp"
 DOMAIN_FILE="/usr/local/etc/xray/warp_domains.txt"
 
-RED="\033[31m"
 GREEN="\033[32m"
-YELLOW="\033[33m"
-CYAN="\033[36m"
+RED="\033[31m"
 PLAIN="\033[0m"
 
 install_deps(){
-for pkg in jq curl wget bc; do
-if ! command -v $pkg >/dev/null 2>&1; then
+for p in curl wget jq bc; do
+if ! command -v $p >/dev/null 2>&1; then
 if command -v apt >/dev/null; then
-apt update -y && apt install -y $pkg
+apt update -y && apt install -y $p
 elif command -v yum >/dev/null; then
-yum install -y $pkg
+yum install -y $p
 elif command -v dnf >/dev/null; then
-dnf install -y $pkg
+dnf install -y $p
 fi
 fi
 done
@@ -28,8 +26,8 @@ done
 
 install_cmd(){
 if [ ! -f "$INSTALL_PATH" ]; then
-cp "$0" $INSTALL_PATH
-chmod +x $INSTALL_PATH
+cp "$0" "$INSTALL_PATH"
+chmod +x "$INSTALL_PATH"
 fi
 }
 
@@ -41,33 +39,54 @@ check_xray(){
 systemctl is-active xray >/dev/null 2>&1
 }
 
-get_ip_country(){
+ip_country(){
 ip=$1
-country=$(curl -s ipinfo.io/$ip/country)
-echo "$ip ($country)"
+c=$(curl -s ipinfo.io/$ip/country)
+echo "$ip ($c)"
 }
 
-get_default_ip(){
-ip=$(curl -s ipinfo.io/ip)
-get_ip_country $ip
-}
-
-get_warp_ip(){
+warp_ip(){
 ip=$(curl -s --socks5 127.0.0.1:$WARP_PORT https://ipinfo.io/ip 2>/dev/null)
-if [ -n "$ip" ]; then
-get_ip_country $ip
-fi
+[ -n "$ip" ] && ip_country "$ip"
 }
 
-warp_latency(){
-lat=$(curl -o /dev/null -s -w '%{time_total}' --socks5 127.0.0.1:$WARP_PORT https://www.cloudflare.com)
-ms=$(echo "$lat * 1000" | bc | cut -d'.' -f1)
-echo "${ms} ms"
+default_ip(){
+ip=$(curl -s ipinfo.io/ip)
+ip_country "$ip"
+}
+
+ai_status(){
+
+openai=$(curl -s --socks5 127.0.0.1:$WARP_PORT https://chat.openai.com >/dev/null && echo "✓" || echo "✗")
+claude=$(curl -s --socks5 127.0.0.1:$WARP_PORT https://claude.ai >/dev/null && echo "✓" || echo "✗")
+gemini=$(curl -s --socks5 127.0.0.1:$WARP_PORT https://gemini.google.com >/dev/null && echo "✓" || echo "✗")
+genmini=$gemini
+
+echo "AI 状态    : OpenAI $openai  Claude $claude  Gemini $gemini genmini   $genmini"
+
+}
+
+google_region(){
+
+google_country=$(curl -s https://ipinfo.io/country)
+
+if [ "$google_country" = "CN" ]; then
+google="中国"
+else
+google="$google_country"
+fi
+
+yt=$(curl -s --socks5 127.0.0.1:$WARP_PORT https://www.youtube.com | grep -o 'countryCode":"[A-Z]*' | head -n1 | cut -d'"' -f3)
+
+[ -z "$yt" ] && yt="Unknown"
+
+echo "Google    ：Google（$google）YouTube（$yt）"
+
 }
 
 install_warp(){
 wget -qN https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh
-bash menu.sh s5
+bash menu.sh b
 }
 
 uninstall_warp(){
@@ -83,35 +102,33 @@ stop_warp(){
 warp off 2>/dev/null
 }
 
-warp_best_ip(){
-wget -qN https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh
-bash menu.sh b
-}
-
-ai_check(){
-openai=$(curl -s --socks5 127.0.0.1:$WARP_PORT https://chat.openai.com >/dev/null && echo "✓" || echo "✗")
-claude=$(curl -s --socks5 127.0.0.1:$WARP_PORT https://claude.ai >/dev/null && echo "✓" || echo "✗")
-gemini=$(curl -s --socks5 127.0.0.1:$WARP_PORT https://gemini.google.com >/dev/null && echo "✓" || echo "✗")
-genmini=$(curl -s --socks5 127.0.0.1:$WARP_PORT https://gemini.google.com >/dev/null && echo "✓" || echo "✗")
-echo "AI 状态    : OpenAI $openai  Claude $claude  Gemini $gemini genmini  : $genmini"
-}
-
-google_region(){
-g=$(curl -s --socks5 127.0.0.1:$WARP_PORT https://www.google.com | grep -o "country=[A-Z]*" | head -n1 | cut -d= -f2)
-y=$(curl -s --socks5 127.0.0.1:$WARP_PORT https://www.youtube.com | grep -o "countryCode\":\"[A-Z]*" | head -n1 | cut -d\" -f3)
-[ -z "$g" ] && g="Unknown"
-[ -z "$y" ] && y="Unknown"
-echo "Google    ：Google（$g）YouTube（$y）"
-}
-
 domain_manage(){
+
 mkdir -p /usr/local/etc/xray
-touch $DOMAIN_FILE
+touch "$DOMAIN_FILE"
+
+echo
+echo "已添加的分流域名:"
+cat "$DOMAIN_FILE" 2>/dev/null
+
+echo
 read -p "输入域名: " d
-if grep -q "$d" $DOMAIN_FILE; then
-sed -i "/$d/d" $DOMAIN_FILE
+
+if grep -q "^$d$" "$DOMAIN_FILE" 2>/dev/null; then
+sed -i "/^$d$/d" "$DOMAIN_FILE"
+echo "已删除: $d"
 else
-echo "$d" >> $DOMAIN_FILE
+echo "$d" >> "$DOMAIN_FILE"
+echo "已添加: $d"
+fi
+
+}
+
+show_domains(){
+if [ -f "$DOMAIN_FILE" ]; then
+tr '\n' ' ' < "$DOMAIN_FILE"
+else
+echo "无"
 fi
 }
 
@@ -131,30 +148,29 @@ else
 xray_status="${RED}● 未运行${PLAIN}"
 fi
 
-warp_ip=$(get_warp_ip)
-default_ip=$(get_default_ip)
-latency=$(warp_latency)
-domains=$(cat $DOMAIN_FILE 2>/dev/null | wc -l)
+warpip=$(warp_ip)
+defaultip=$(default_ip)
+domains=$(show_domains)
 
 echo "==================================================="
-echo "           Xray WARP 分流管理（包含系统级命令warp 终端输入即可进入交互界面）"
+echo "           Xray WARP 分流管理 #包含系统级命令warp 终端输入即可进入交互界面"
 echo "==================================================="
 echo -e "WARP 状态: $warp_status"
 echo -e "XRAY 状态: $xray_status"
-echo "WARP IP  : $warp_ip"
-echo "延迟     : $latency"
-echo "默认出口 : $default_ip"
-echo "分流域名 : $domains 条"
-ai_check
+echo "WARP IP  : $warpip"
+echo "默认出口 : $defaultip"
+echo "分流域名 : $domains"
+ai_status
 google_region
 echo "---------------------------------------------------"
-echo "1 安装/重装 WARP （以vps本机IP地址自动优选warp IP）"
+echo "1 安装/重装 WARP #以vps本机IP地址自动优选warp IP"
 echo "2 卸载 WARP"
-echo "3 自定义分流域名 （没有的域名则添加 有的即删除）"
+echo "3 自定义分流域名 #没有的域名则添加 有的即删除 并显示已添加的domain"
 echo "4 启动/停止 WARP"
 echo "---------------------------------------------------"
 echo "0 退出"
 echo "==================================================="
+
 }
 
 menu(){
