@@ -1,0 +1,247 @@
+#!/bin/bash
+
+# ─────────────────────────────────────────────
+#  Xray WARP 分流管理
+#  策略：默认走本机 IP，仅指定域名走 WARP
+# ─────────────────────────────────────────────
+
+# 颜色定义
+RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; CYAN="\033[36m"; GRAY="\033[90m"; PLAIN="\033[0m"
+
+# ─── 路径自动适配 ────────────────────────────
+POSSIBLE_CONFIGS=(
+    "/usr/local/etc/xray/config.json"
+    "/etc/xray/config.json"
+    "/usr/local/share/xray/config.json"
+)
+
+CONFIG_FILE=""
+for path in "${POSSIBLE_CONFIGS[@]}"; do
+    if [ -f "$path" ]; then
+        CONFIG_FILE="$path"
+        break
+    fi
+done
+[ -z "$CONFIG_FILE" ] && CONFIG_FILE="/usr/local/etc/xray/config.json"
+
+WARP_PORT=40000
+SCRIPT_PATH="/usr/local/bin/warp"
+UI_MESSAGE=""
+
+# ─── 系统初始化 ────────────────────────────
+install_command() {
+    if [[ "$0" != "$SCRIPT_PATH" ]]; then
+        cp "$0" "$SCRIPT_PATH" &>/dev/null
+        chmod +x "$SCRIPT_PATH" &>/dev/null
+        UI_MESSAGE="${GREEN}已安装系统命令，以后直接输入 ${YELLOW}warp${GREEN} 即可调用。${PLAIN}"
+    fi
+}
+
+# ─── 环境检查 ────────────────────────────────
+if [ "$EUID" -ne 0 ]; then echo -e "${RED}请使用 sudo 运行此脚本！${PLAIN}"; exit 1; fi
+
+# 自动安装 jq 依赖
+if ! command -v jq &>/dev/null; then 
+    echo -e "${YELLOW}正在安装必要组件 jq...${PLAIN}"
+    apt update && apt install -y jq || yum install -y jq
+fi
+
+# ─── 核心工具函数 ────────────────────────────
+check_warp_socket() { (echo > /dev/tcp/127.0.0.1/$WARP_PORT) >/dev/null 2>&1; }
+
+wait_for_port() {
+    for i in {1..15}; do
+        if check_warp_socket; then return 0; fi
+        sleep 1
+    done
+    return 1
+}
+
+get_warp_rules() {
+    [ ! -f "$CONFIG_FILE" ] && return
+    jq -r '.routing.rules[]? | select(.outboundTag=="warp_proxy") | .domain[]?' "$CONFIG_FILE" 2>/dev/null
+}
+
+# ─── Xray 配置重组逻辑 ──────────────────────
+rebuild_config_logic() {
+    [ ! -f "$CONFIG_FILE" ] && return
+
+    # 1. 确保 outbounds 中包含 direct_out 和 warp_proxy
+    # 逻辑：过滤掉现有的这两个 tag，然后将它们作为前两个插入，保证 direct_out 是默认出口
+    jq --argjson port "$WARP_PORT" '
+        (.outbounds | map(select(.tag != "direct_out" and .tag != "warp_proxy"))) as $others |
+        [
+          {"tag": "direct_out", "protocol": "freedom", "settings": {}},
+          {"tag": "warp_proxy", "protocol": "socks", "settings": {"servers": [{"address": "127.0.0.1", "port": $port}]}}
+        ] + $others as $new_outbounds |
+        .outbounds = $new_outbounds |
+        .routing.domainStrategy = "IPIfNonMatch"
+    ' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+}
+
+apply_changes() {
+    systemctl restart xray >/dev/null 2>&1
+}
+
+# ─── 菜单功能实现 ────────────────────────────
+
+# 1. 自动安装
+install_warp() {
+    clear
+    echo -e "\n${CYAN}正在自动安装 WARP (中文模式 + 默认端口)...${PLAIN}"
+    
+    if ! command -v wget &>/dev/null; then apt update && apt install -y wget; fi
+    
+    wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh
+    
+    # 模拟输入：2 (中文) -> 回车 (IPv4/IPv6默认) -> 回车 (默认端口) -> ...
+    printf "2\n\n\n\n\n" | bash menu.sh c
+
+    if wait_for_port; then
+        rebuild_config_logic
+        apply_changes
+        UI_MESSAGE="${GREEN}安装成功！默认流量走本机 IP，分流域名走 WARP。${PLAIN}"
+    else
+        UI_MESSAGE="${RED}安装后检测超时，请检查 WARP 是否正常运行。${PLAIN}"
+    fi
+}
+
+# 2. 卸载
+uninstall_warp() {
+    clear
+    echo -e "\n${RED}正在卸载 WARP 并恢复配置...${PLAIN}"
+    wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh
+    printf "2\n" | bash menu.sh u
+    
+    # 清理 Xray 中的 WARP 相关配置
+    jq '
+        del(.outbounds[] | select(.tag=="warp_proxy")) | 
+        del(.routing.rules[] | select(.outboundTag=="warp_proxy"))
+    ' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+    
+    apply_changes
+    UI_MESSAGE="${GREEN}卸载及规则清理完毕。${PLAIN}"
+}
+
+# 3. 分流管理
+manage_custom_rule() {
+    if ! check_warp_socket; then UI_MESSAGE="${RED}错误：WARP 未运行，无法配置分流！${PLAIN}"; return; fi
+    
+    echo -e "\n${CYAN}请输入要走 WARP 的域名标签 (例如 geosite:google 或 domain:openai.com)${PLAIN}"
+    read -p "输入已存在则删除，不存在则添加: " user_input
+    [ -z "$user_input" ] && return
+
+    # 确保基础结构正确
+    rebuild_config_logic
+
+    # 检查输入是否已在分流名单中
+    local exists=$(jq -r --arg target "$user_input" '
+        .routing.rules[]? | select(.outboundTag=="warp_proxy" and (.domain[]? == $target)) | .outboundTag
+    ' "$CONFIG_FILE" 2>/dev/null)
+    
+    if [ -n "$exists" ]; then
+        # 移除已有的域名
+        jq --arg target "$user_input" '
+            .routing.rules |= map(
+                if .outboundTag == "warp_proxy" 
+                then .domain |= map(select(. != $target)) 
+                else . end
+            ) | .routing.rules |= map(select((.domain | length > 0) or .outboundTag != "warp_proxy"))
+        ' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+        UI_MESSAGE="${YELLOW}已移除分流: $user_input${PLAIN}"
+    else
+        # 添加新域名
+        local has_warp_rule=$(jq '.routing.rules[]? | select(.outboundTag=="warp_proxy")' "$CONFIG_FILE")
+        if [ -z "$has_warp_rule" ]; then
+            # 创建新规则块并插入数组首位
+            jq --arg target "$user_input" '
+                .routing.rules = [{
+                    "type": "field", 
+                    "domain": [$target], 
+                    "outboundTag": "warp_proxy"
+                }] + .routing.rules
+            ' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+        else
+            # 在现有块中追加域名
+            jq --arg target "$user_input" '
+                (.routing.rules[] | select(.outboundTag=="warp_proxy")).domain += [$target]
+            ' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+        fi
+        UI_MESSAGE="${GREEN}已添加分流: $user_input${PLAIN}"
+    fi
+    apply_changes
+}
+
+# 4. 开关控制
+toggle_warp() {
+    if check_warp_socket; then
+        systemctl stop warp >/dev/null 2>&1
+        UI_MESSAGE="${YELLOW}WARP 服务已停止${PLAIN}"
+    else
+        systemctl start warp >/dev/null 2>&1
+        if wait_for_port; then
+            UI_MESSAGE="${GREEN}WARP 服务已启动${PLAIN}"
+        else
+            UI_MESSAGE="${RED}启动失败，请检查是否已安装 WARP${PLAIN}"
+        fi
+    fi
+}
+
+# ─── 菜单界面 ────────────────────────────────
+show_menu() {
+    clear
+    # 获取网络信息 (带超时处理)
+    local vps_trace=$(curl -s4m 2 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+    local VPS_IP=$(echo "$vps_trace" | grep "ip=" | cut -d= -f2 || echo "Unknown")
+    local VPS_LOC=$(echo "$vps_trace" | grep "loc=" | cut -d= -f2 || echo "??")
+
+    if check_warp_socket; then 
+        STATUS_SOCK="${GREEN}● 运行中${PLAIN}"
+        local warp_trace=$(curl -s4m 2 --socks5 127.0.0.1:$WARP_PORT https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+        WARP_IP=$(echo "$warp_trace" | grep "ip=" | cut -d= -f2 || echo "Error")
+        WARP_LOC=$(echo "$warp_trace" | grep "loc=" | cut -d= -f2 || echo "??")
+        TOGGLE_TEXT="关闭 WARP 服务"
+    else 
+        STATUS_SOCK="${RED}● 已停止${PLAIN}"
+        WARP_IP="N/A"; WARP_LOC="N/A"
+        TOGGLE_TEXT="开启 WARP 服务"
+    fi
+
+    STATUS_XRAY=$(systemctl is-active xray &>/dev/null && echo -e "${GREEN}● 运行中${PLAIN}" || echo -e "${RED}● 未运行${PLAIN}")
+
+    local current_rules=$(get_warp_rules | tr '\n' ' ' | sed 's/ $//')
+    [ -z "$current_rules" ] && current_rules="${GRAY}无 (全部走本机IP)${PLAIN}"
+
+    echo -e "           Xray WARP 分流管理系统           "
+    echo -e "${CYAN}===================================================${PLAIN}"
+    echo -e "  WARP 状态: ${STATUS_SOCK}"
+    echo -e "  Xray 状态: ${STATUS_XRAY}"
+    echo -e "  WARP IP  : ${GREEN}${WARP_IP}${PLAIN} (${WARP_LOC})"
+    echo -e "  分流域名 : ${YELLOW}${current_rules}${PLAIN}"
+    echo -e "  默认出口 : ${CYAN}${VPS_IP}${PLAIN} (${VPS_LOC})"
+    echo -e "---------------------------------------------------"
+    echo -e "  1. ${GREEN}自动安装${PLAIN} WARP (中文/默认端口)"
+    echo -e "  2. ${RED}卸载${PLAIN} WARP 及分流配置"
+    echo -e "  3. 添加/删除 自定义分流域名"
+    echo -e "  4. ${YELLOW}${TOGGLE_TEXT}${PLAIN}"
+    echo -e "---------------------------------------------------"
+    echo -e "  0. 退出脚本"
+    echo -e "==================================================="
+    if [ -n "$UI_MESSAGE" ]; then echo -e "${YELLOW}提示${PLAIN}: ${UI_MESSAGE}"; UI_MESSAGE=""; fi
+}
+
+# ─── 主循环 ──────────────────────────────────
+install_command
+while true; do
+    show_menu
+    echo -ne "请输入选项 [0-4]: "
+    read -r choice
+    case "$choice" in
+        1) install_warp ;;
+        2) uninstall_warp ;;
+        3) manage_custom_rule ;;
+        4) toggle_warp ;;
+        0) exit 0 ;;
+        *) UI_MESSAGE="${RED}无效输入！${PLAIN}" ;;
+    esac
+done
