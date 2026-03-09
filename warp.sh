@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ─────────────────────────────────────────────
-#  Xray WARP 分流管理
+#  Xray WARP 分流管理器 (精细化分流版)
 #  策略：默认走本机 IP，仅指定域名走 WARP
 # ─────────────────────────────────────────────
 
@@ -130,16 +130,21 @@ toggle_warp() {
 # ─── 菜单界面 ────────────────────────────────
 show_menu() {
     clear
+    # 获取本机原生 IP 信息
+    local vps_trace=$(curl -s4m 2 https://www.cloudflare.com/cdn-cgi/trace)
+    local VPS_IP=$(echo "$vps_trace" | grep "ip=" | cut -d= -f2)
+    local VPS_LOC=$(echo "$vps_trace" | grep "loc=" | cut -d= -f2)
+
     # 检测 WARP 状态
     if check_warp_socket; then 
         STATUS_SOCK="${GREEN}● 运行中${PLAIN}"
-        local trace=$(curl -s4m 2 --socks5 127.0.0.1:$WARP_PORT https://www.cloudflare.com/cdn-cgi/trace)
-        WARP_IP=$(echo "$trace" | grep "ip=" | cut -d= -f2)
-        WARP_LOC=$(echo "$trace" | grep "loc=" | cut -d= -f2)
+        local warp_trace=$(curl -s4m 2 --socks5 127.0.0.1:$WARP_PORT https://www.cloudflare.com/cdn-cgi/trace)
+        WARP_IP=$(echo "$warp_trace" | grep "ip=" | cut -d= -f2)
+        WARP_LOC=$(echo "$warp_trace" | grep "loc=" | cut -d= -f2)
         TOGGLE_TEXT="关闭 WARP 服务"
     else 
         STATUS_SOCK="${RED}● 已停止${PLAIN}"
-        WARP_IP=""; WARP_LOC=""
+        WARP_IP="N/A"; WARP_LOC="N/A"
         TOGGLE_TEXT="开启 WARP 服务"
     fi
 
@@ -154,15 +159,13 @@ show_menu() {
     local current_rules=$(get_warp_rules | tr '\n' ' ' | sed 's/ $//')
     [ -z "$current_rules" ] && current_rules="${GRAY}无 (全部走本机IP)${PLAIN}"
 
-    echo -e "${CYAN}===================================================${PLAIN}"
     echo -e "           Xray WARP 分流管理         "
     echo -e "${CYAN}===================================================${PLAIN}"
     echo -e "  WARP 状态: ${STATUS_SOCK}"
     echo -e "  Xray 接口: ${STATUS_XRAY}"
-    echo -e "  WARP IP  : ${GREEN}${WARP_IP:-N/A}${PLAIN} (${WARP_LOC:-N/A})"
-    echo -e "  归 属 地 : ${GREEN}${WARP_LOC:-N/A}${PLAIN}"
+    echo -e "  WARP IP  : ${GREEN}${WARP_IP}${PLAIN} (${WARP_LOC})"
     echo -e "  分流域名 : ${YELLOW}${current_rules}${PLAIN}"
-    echo -e "  默认出口 : ${CYAN}VPS 本机原生 IP${PLAIN}"
+    echo -e "  默认出口 : ${CYAN}${VPS_IP}${PLAIN} (${VPS_LOC})"
     echo -e "---------------------------------------------------"
     echo -e "  1. 安装/重装 WARP (自动优选节点)"
     echo -e "  2. 卸载/清理 WARP 及所有分流规则"
