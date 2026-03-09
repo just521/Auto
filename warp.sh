@@ -122,18 +122,17 @@ show_menu() {
     if check_xray_outbound; then STATUS_XRAY="${GREEN}● 已连接${PLAIN}"; else STATUS_XRAY="${YELLOW}● 未连接${PLAIN}"; fi
 
     STATUS_NF=$(check_rule_ui "geosite:netflix")
-    STATUS_AI=$(check_rule_ui "geosite:openai")
+    STATUS_AI=$(check_rule_ui "geosite:google")
 
     echo -e "${CYAN}===================================================${PLAIN}\033[K"
     echo -e "${CYAN}           WARP 分流管理面板 (Xray Warp)          ${PLAIN}\033[K"
     echo -e "${CYAN}===================================================${PLAIN}\033[K"
     echo -e "  WARP 服务: ${STATUS_SOCK}    Xray 接口: ${STATUS_XRAY}\033[K"
     echo -e "---------------------------------------------------\033[K"
-    echo -e "  1. 安装/重装 WARP    - ${GRAY}自动配置 Socks5 端口 40000${PLAIN}\033[K"
-    echo -e "  2. 卸载/清理 WARP    - ${GRAY}卸载并清理残留规则${PLAIN}\033[K"
-    echo -e ""\033[K
+    echo -e "  1. 安装/重装 WARP    ${GRAY}自动配置 Socks5 端口 40000${PLAIN}\033[K"
+    echo -e "  2. 卸载/清理 WARP    ${GRAY}卸载并清理残留规则${PLAIN}\033[K"
     echo -e "  3. 开启/关闭 Netflix 分流              - ${STATUS_NF}\033[K"
-    echo -e "  4. 开启/关闭 OpenAI, Claude, Grok 分流 - ${STATUS_AI}\033[K"
+    echo -e "  4. 开启/关闭 Google 分流 - ${STATUS_AI}\033[K"
     echo -e "---------------------------------------------------\033[K"
     echo -e "  0. 退出 (Exit)\033[K"
     echo -e "===================================================\033[K"
@@ -169,7 +168,7 @@ while true; do
         1) install_warp ;;
         2) uninstall_warp ;;
         3) toggle_rule "Netflix"      '["geosite:netflix"]' ;;
-        4) toggle_rule "AI Services"  '["geosite:openai","geosite:anthropic","geosite:twitter"]' ;;
+        4) toggle_rule "Google"  '["geosite:google"]' ;;
         0) clear; exit 0 ;;
     esac
 done
