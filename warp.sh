@@ -132,7 +132,7 @@ show_menu() {
     echo -e "  1. 安装/重装 WARP    ${GRAY}自动配置 Socks5 端口 40000${PLAIN}\033[K"
     echo -e "  2. 卸载/清理 WARP    ${GRAY}卸载并清理残留规则${PLAIN}\033[K"
     echo -e "  3. 开启/关闭 Netflix 分流              - ${STATUS_NF}\033[K"
-    echo -e "  4. 开启/关闭 Google 分流 - ${STATUS_AI}\033[K"
+    echo -e "  4. 开启/关闭 Google 分流               - ${STATUS_AI}\033[K"
     echo -e "---------------------------------------------------\033[K"
     echo -e "  0. 退出 (Exit)\033[K"
     echo -e "===================================================\033[K"
