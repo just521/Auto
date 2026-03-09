@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ─────────────────────────────────────────────
-#  Xray WARP 动态分流管理器 (精简版)
+#  Xray WARP 分流管理器
 # ─────────────────────────────────────────────
 
 RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; CYAN="\033[36m"; GRAY="\033[90m"; PLAIN="\033[0m"
@@ -143,7 +143,7 @@ show_menu() {
     [ -z "$current_rules" ] && current_rules="${GRAY}无${PLAIN}"
 
     echo -e "${CYAN}===================================================${PLAIN}"
-    echo -e "${CYAN}           Xray WARP 动态分流管理面板           ${PLAIN}"
+    echo -e "${CYAN}           Xray WARP 分流管理           ${PLAIN}"
     echo -e "${CYAN}===================================================${PLAIN}"
     echo -e "  WARP 状态: ${STATUS_SOCK}"
     echo -e "  Xray 接口: ${STATUS_XRAY}"
